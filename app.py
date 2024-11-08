@@ -1,45 +1,44 @@
 from flask import Flask, render_template, request, Response, redirect, url_for, send_from_directory
 import yt_dlp
-import re
 import os
+import re
 import tempfile
 
 app = Flask(__name__)
 
-# Directory to store cookies and ensure `uploads` exists
+# Folder for storing uploaded cookies and favicon file
 UPLOAD_FOLDER = 'uploads'
+COOKIES_PATH = os.path.join(UPLOAD_FOLDER, 'cookies.txt')  # Path to cookies.txt file
+
+# Ensure the upload folder exists
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
-# Path for cookies file, auto-generated or provided
-COOKIES_PATH = os.path.join(UPLOAD_FOLDER, 'cookies.txt')
-
-def download_file(link, format='mp3', cookies_path=None):
+def download_file(link, format='mp3', cookies_path=COOKIES_PATH):
     """Download YouTube video/audio and yield data in chunks from a temporary file."""
     try:
         print("Starting download process...")
 
-        # Check if the link is a valid YouTube URL
         if re.match(r'^(https?://)?(www\.)?(youtube\.com|youtu\.be|music\.youtube\.com)/.+', link):
             ydl_opts = {
                 'format': 'bestaudio[ext=m4a]' if format == 'mp3' else 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]',
                 'quiet': True,
-                'cookiefile': cookies_path,  # Use auto-generated cookies.txt path
+                'cookiefile': cookies_path,  # Path to uploaded cookies.txt file
                 'outtmpl': tempfile.mktemp(suffix=f".{format}")  # Temporary file path
             }
             
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 print("Extracting info and downloading...")
                 
-                # Attempt extraction to verify cookies
+                # Try to extract video information to test if cookies are working
                 try:
                     info = ydl.extract_info(link, download=False)
-                    print("Cookies are valid. Video info extracted.")
+                    print("Cookies are working! Video info extracted successfully.")
                 except yt_dlp.utils.DownloadError as e:
-                    print("Cookies failed verification:", e)
-                    return "Cookies are invalid. Please check.", 400
+                    print("Cookies are not working or download failed:", e)
+                    return "Cookies are not working or verification failed. Please update your cookies.", 400
 
-                # Download the video/audio
+                # Continue to download if extraction is successful
                 info = ydl.extract_info(link)
                 filename = ydl.prepare_filename(info)
                 print("Download complete:", filename)
@@ -71,11 +70,21 @@ def convert_to_mp3():
 def convert_to_mp4():
     return render_template('ConvertToMp4.html')
 
-# Serve the favicon to avoid 404 errors in browser requests
 @app.route('/favicon.ico')
 def favicon():
-    return send_from_directory(os.path.join(app.root_path, 'static'),
-                               'favicon.ico', mimetype='image/vnd.microsoft.icon')
+    return send_from_directory(os.path.join(app.root_path, 'static'), 'favicon.ico', mimetype='image/vnd.microsoft.icon')
+
+@app.route('/upload')
+def upload_cookies():
+    return render_template('UploadCookies.html')
+
+@app.route('/upload-cookies', methods=['POST'])
+def upload_cookies_file():
+    file = request.files.get('cookies')
+    if file:
+        file.save(COOKIES_PATH)  # Save cookies directly to the designated path
+        return "Cookies file uploaded successfully", 200
+    return "No file uploaded", 400
 
 @app.route('/download', methods=['POST'])
 def download_mp3():
@@ -88,4 +97,4 @@ def download_mp4():
     return download_file(link, format='mp4', cookies_path=COOKIES_PATH)
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    app.run(host='0.0.0.0', port=8000, debug=True)
