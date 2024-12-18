@@ -1,104 +1,116 @@
-from flask import Flask, render_template, request, Response
+from flask import Flask, render_template, request, Response, redirect, url_for
 import yt_dlp
-import os
-import tempfile
 import re
+import os
+import platform
+import tempfile
+from threading import Lock
 
 app = Flask(__name__)
 
 # Folder to store uploaded cookies
 UPLOAD_FOLDER = 'uploads'
+COOKIES_FILE = os.path.join(UPLOAD_FOLDER, 'cookies.txt')
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
-def download_file(link, format='mp3', cookies_path=None):
-    """Download YouTube video/audio using yt-dlp and stream the file."""
+# Default download directories for different platforms
+DOWNLOAD_DIR_PC = os.path.join(os.path.expanduser("~"), "Downloads")  # Default for PC (Windows/Linux)
+DOWNLOAD_DIR_MAC = os.path.join(os.path.expanduser("~"), "Downloads")  # Default for Mac
+DOWNLOAD_DIR_ANDROID = '/storage/emulated/0/Download'  # Default for Android
+DOWNLOAD_DIR_IOS = '/var/mobile/Media/Downloads'  # Placeholder for iOS
+
+# Lock to prevent concurrent downloads
+download_lock = Lock()
+
+def get_download_directory():
+    """Identify the device type and return the appropriate download directory."""
+    system = platform.system()
+    if system == 'Linux' and 'ANDROID_STORAGE' in os.environ:
+        return DOWNLOAD_DIR_ANDROID
+    elif system == 'Darwin':
+        return DOWNLOAD_DIR_MAC
+    elif system == 'Windows':
+        return DOWNLOAD_DIR_PC
+    else:
+        return DOWNLOAD_DIR_PC  # Default for other platforms like Linux desktops
+
+def download_file(link, format):
+    """Download YouTube video/audio and yield data in chunks."""
+    if format not in ['mp3', 'mp4']:
+        return "Invalid format. Only MP3 or MP4 formats are allowed.", 400
+
     try:
         print("Starting download process...")
+        DOWNLOAD_DIR = get_download_directory()
+        print(f"Download directory: {DOWNLOAD_DIR}")
 
-        # Check if the link is a valid YouTube URL
+        # Verify link is a YouTube URL
         if re.match(r'^(https?://)?(www\.)?(youtube\.com|youtu\.be|music\.youtube\.com)/.+', link):
-            ydl_opts = {
-                'format': 'bestaudio[ext=m4a]' if format == 'mp3' else 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]',
-                'cookiefile': cookies_path,  # Path to uploaded cookies file
-                'quiet': False,  # Set to False for debugging
-                'verbose': True,
-                'outtmpl': tempfile.mktemp(suffix=f".{format}")  # Temporary file path
-            }
-            
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                print("Checking if cookies are valid...")
+            with download_lock:  # Lock to ensure no concurrent downloads
+                ydl_opts = {
+                    'format': 'bestaudio[ext=m4a]' if format == 'mp3' else 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]',
+                    'quiet': True,
+                    'cookiefile': COOKIES_FILE if os.path.exists(COOKIES_FILE) else None,
+                    'outtmpl': os.path.join(DOWNLOAD_DIR, '%(title)s.%(ext)s')  # Save to detected directory
+                }
 
-                try:
-                    # Attempt to fetch video information without downloading to test cookies
-                    info = ydl.extract_info(link, download=False)
-                    print("Cookies appear to be working; proceeding with download...")
-                except yt_dlp.utils.DownloadError as e:
-                    print("Cookies failed or require update:", e)
-                    return "Cookies are invalid or verification failed. Please update cookies.", 400
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    print("Extracting info and downloading...")
+                    info = ydl.extract_info(link)
+                    filename = ydl.prepare_filename(info)
+                    print("Download complete:", filename)
 
-                # Continue with download if cookies are verified
-                info = ydl.extract_info(link)
-                filename = ydl.prepare_filename(info)
-                print("Download complete:", filename)
+                    def generate(file_path):
+                        with open(file_path, 'rb') as f:
+                            while chunk := f.read(8192):
+                                yield chunk
 
-                # Stream the file back to the client
-                def generate(file_path):
-                    with open(file_path, 'rb') as f:
-                        while chunk := f.read(8192):
-                            yield chunk
-                    os.remove(file_path)  # Clean up after streaming
-
-                mimetype = 'audio/mpeg' if format == 'mp3' else 'video/mp4'
-                return Response(generate(filename),
-                                mimetype=mimetype,
-                                headers={'Content-Disposition': f'attachment; filename="{info["title"]}.{format}"'})
+                    mimetype = 'audio/mpeg' if format == 'mp3' else 'video/mp4'
+                    return Response(generate(filename),
+                                    mimetype=mimetype,
+                                    headers={'Content-Disposition': f'attachment; filename="{info["title"]}.{format}"'})
 
         else:
-            print("Invalid or unsupported link format:", link)
-            return "Unsupported link format", 400
+            print("Unsupported link:", link)
+            return "Unsupported Link", 400
 
     except Exception as e:
-        print(f"Unexpected error during download: {e}")
-        return "Download failed due to an error.", 400
+        print(f"Error during download: {e}")
+        return "Download failed", 400
+
 
 @app.route('/')
-def index():
+def convert_to_mp3():
     return render_template('ConvertToMp3.html')
+
+@app.route('/convert-to-mp4')
+def convert_to_mp4():
+    return render_template('ConvertToMp4.html')
+
+@app.route('/upload')
+def upload_cookies():
+    return render_template('UploadCookies.html')
 
 @app.route('/upload-cookies', methods=['POST'])
 def upload_cookies_file():
-    """Endpoint to handle cookies file upload."""
+    """Handles the upload of the cookies.txt file only, storing it in the uploads directory."""
     file = request.files.get('cookies')
-    if file:
-        cookies_path = os.path.join(app.config['UPLOAD_FOLDER'], 'cookies.txt')
-        file.save(cookies_path)
-        print("Cookies uploaded and saved.")
-        return "Cookies uploaded successfully", 200
-    else:
-        return "No cookies file uploaded", 400
+    if file and file.filename.endswith('.txt'):
+        file.save(COOKIES_FILE)
+        print(f"Cookies file uploaded to: {COOKIES_FILE}")
+        return redirect(url_for('convert_to_mp3'))  # Redirect to main page or specified page
+    return "Invalid file or no file uploaded. Please upload a valid cookies.txt file.", 400
 
 @app.route('/download', methods=['POST'])
 def download_mp3():
-    """Endpoint to download MP3 using cookies."""
     link = request.form.get('link')
-    cookies_path = os.path.join(app.config['UPLOAD_FOLDER'], 'cookies.txt')
-
-    if not os.path.exists(cookies_path):
-        return "Cookies file is missing. Please upload it first.", 400
-
-    return download_file(link, format='mp3', cookies_path=cookies_path)
+    return download_file(link, format='mp3')
 
 @app.route('/download-mp4', methods=['POST'])
 def download_mp4():
-    """Endpoint to download MP4 using cookies."""
     link = request.form.get('link')
-    cookies_path = os.path.join(app.config['UPLOAD_FOLDER'], 'cookies.txt')
-
-    if not os.path.exists(cookies_path):
-        return "Cookies file is missing. Please upload it first.", 400
-
-    return download_file(link, format='mp4', cookies_path=cookies_path)
+    return download_file(link, format='mp4')
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=8000, debug=True)
+    app.run(host='0.0.0.0', port=0000, debug=True)
